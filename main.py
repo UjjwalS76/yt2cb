@@ -4,7 +4,7 @@ import re
 from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound
 from typing import Optional, Dict, List
 
-# LangChain + Perplexity AI
+# LangChain components
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.chains import ConversationalRetrievalChain
 from langchain.memory import ConversationBufferMemory
@@ -13,17 +13,16 @@ from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.chat_models import ChatAnyscale
 
-# Get API key from Streamlit secrets
+# Ensure the Perplexity API key is set in Streamlit secrets
 os.environ["ANYSCALE_API_KEY"] = st.secrets["ANYSCALE_API_KEY"]
 
 def extract_video_id(url: str) -> Optional[str]:
-    """Extract YouTube video ID from URL."""
+    """Extracts the YouTube video ID from a URL."""
     patterns = [
-        r'(?:v=|\/)([0-9A-Za-z_-]{11}).*',
-        r'(?:embed\/)([0-9A-Za-z_-]{11})',
-        r'(?:youtu\.be\/)([0-9A-Za-z_-]{11})'
+        r"(?:v=|\/)([0-9A-Za-z_-]{11}).*",
+        r"(?:embed\/)([0-9A-Za-z_-]{11})",
+        r"(?:youtu\.be\/)([0-9A-Za-z_-]{11})",
     ]
-
     for pattern in patterns:
         match = re.search(pattern, url)
         if match:
@@ -31,24 +30,22 @@ def extract_video_id(url: str) -> Optional[str]:
     return None
 
 def get_video_info_from_transcript(transcript_list) -> Dict:
-    """Get basic video info from transcript metadata (or handle errors)."""
+    """Gets basic video information from the transcript metadata."""
     try:
-        # Attempt to find English transcript
-        transcript = transcript_list.find_transcript(['en'])
+        transcript = transcript_list.find_transcript(["en"])
         video_info = transcript.video_metadata
         return {
-            "title": video_info.get('title', 'Unknown Title'),
-            "duration": video_info.get('duration', 0)
+            "title": video_info.get("title", "Unknown Title"),
+            "duration": video_info.get("duration", 0),
         }
     except NoTranscriptFound:
-        # Fallback if English transcript not found
         st.warning("English transcript not found. Attempting to use other available transcripts.")
         try:
-            transcript = transcript_list.find_transcript([]) # Find any transcript
+            transcript = transcript_list.find_transcript([])
             video_info = transcript.video_metadata
             return {
-                "title": video_info.get('title', 'Unknown Title'),
-                "duration": video_info.get('duration', 0)
+                "title": video_info.get("title", "Unknown Title"),
+                "duration": video_info.get("duration", 0),
             }
         except Exception as e:
             st.warning(f"Could not fetch video metadata: {e}")
@@ -57,60 +54,51 @@ def get_video_info_from_transcript(transcript_list) -> Dict:
         st.warning(f"Could not fetch video metadata: {e}")
         return {"title": "Unknown Title", "duration": 0}
 
-
 def load_video_transcript(video_url: str) -> Optional[List[Document]]:
-    """Load and process YouTube video transcript with enhanced error handling."""
+    """Loads and processes the YouTube video transcript."""
     try:
         video_id = extract_video_id(video_url)
         if not video_id:
-            st.error("Could not extract video ID from URL")
+            st.error("Could not extract video ID from URL.")
             return None
 
-        # Get transcripts
         transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        print(f"Transcript List: {transcript_list}")
 
-        # Try to get video info from transcript (with fallback)
         video_info = get_video_info_from_transcript(transcript_list)
         st.write(f"📺 **Video Title:** {video_info['title']}")
 
-        # More robust transcript retrieval
         try:
-            # 1. Try to find a generated English transcript
-            transcript = transcript_list.find_generated_transcript(['en'])
+            transcript = transcript_list.find_generated_transcript(["en"])
             st.write("Using generated English transcript.")
         except NoTranscriptFound:
             try:
-                # 2. Try to find a manually created English transcript
-                transcript = transcript_list.find_manually_created_transcript(['en'])
+                transcript = transcript_list.find_manually_created_transcript(["en"])
                 st.write("Using manually created English transcript.")
             except NoTranscriptFound:
                 try:
-                    # 3. Try to find any generated transcript and translate it to English
                     transcript = transcript_list.find_generated_transcript([])
-                    transcript = transcript.translate('en')
+                    transcript = transcript.translate("en")
                     st.write("Using translated generated transcript.")
                 except NoTranscriptFound:
                     try:
-                        # 4. Try to find any manually created transcript and translate it to English
                         transcript = transcript_list.find_manually_created_transcript([])
-                        transcript = transcript.translate('en')
+                        transcript = transcript.translate("en")
                         st.write("Using translated manually created transcript.")
                     except Exception as e:
                         st.error(f"No suitable transcript found: {e}")
                         return None
 
-        # Get transcript text
         transcript_pieces = transcript.fetch()
-        transcript_text = ' '.join([t['text'] for t in transcript_pieces])
+        transcript_text = " ".join([t["text"] for t in transcript_pieces])
 
-        # Create document
         doc = Document(
             page_content=transcript_text,
             metadata={
                 "source": video_id,
-                "title": video_info['title'],
-                "url": video_url
-            }
+                "title": video_info["title"],
+                "url": video_url,
+            },
         )
 
         st.success("Transcript loaded successfully!")
@@ -118,37 +106,28 @@ def load_video_transcript(video_url: str) -> Optional[List[Document]]:
 
     except Exception as e:
         st.error(f"Error loading transcript: {e}")
-        # Add more specific error handling if needed (e.g., for network issues)
         return None
 
-
 def setup_qa_chain(transcript_docs):
-    """Setup QA chain with FAISS vector store."""
+    """Sets up the QA chain with FAISS vector store and Perplexity model."""
     try:
-        # Split text
         text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,
-            chunk_overlap=200,
-            length_function=len
+            chunk_size=1000, chunk_overlap=200, length_function=len
         )
         chunks = text_splitter.split_documents(transcript_docs)
 
-        # Create embeddings using HuggingFace model
-        embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-mpnet-base-v2")
-
-        # Use FAISS for vector store
-        vectorstore = FAISS.from_documents(chunks, embeddings)
-
-        # Setup LLM using Perplexity via Anyscale
-        llm = ChatAnyscale(
-            model_name="mistralai/llama-3-sonar-small-32k-online",
-            temperature=0.7,
+        embeddings = HuggingFaceEmbeddings(
+            model_name="sentence-transformers/all-mpnet-base-v2"
         )
 
-        # Setup memory and chain
+        vectorstore = FAISS.from_documents(chunks, embeddings)
+
+        llm = ChatAnyscale(
+            model_name="mistralai/llama-3-sonar-small-32k-online", temperature=0.7
+        )
+
         memory = ConversationBufferMemory(
-            memory_key="chat_history",
-            return_messages=True
+            memory_key="chat_history", return_messages=True
         )
 
         qa_chain = ConversationalRetrievalChain.from_llm(
@@ -156,7 +135,7 @@ def setup_qa_chain(transcript_docs):
             retriever=vectorstore.as_retriever(),
             memory=memory,
             return_source_documents=False,
-            verbose=False
+            verbose=False,
         )
 
         return qa_chain
@@ -165,11 +144,10 @@ def setup_qa_chain(transcript_docs):
         st.error(f"Error in setup_qa_chain: {str(e)}")
         return None
 
-
 def main():
+    """Main function to run the Streamlit app."""
     st.title("💬 YouTube Video Chat Assistant")
 
-    # Initialize session states
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
     if "video_loaded" not in st.session_state:
@@ -177,26 +155,24 @@ def main():
     if "qa_chain" not in st.session_state:
         st.session_state.qa_chain = None
 
-    # Sidebar
     with st.sidebar:
-        st.markdown("""
+        st.markdown(
+            """
         ### How to use:
-        1. Enter a YouTube video URL
-        2. Wait for transcript processing
-        3. Ask questions about the video
+        1. Enter a YouTube video URL.
+        2. Wait for transcript processing.
+        3. Ask questions about the video.
 
         ### Notes:
-        - Video must have English captions
-        - Links must be from youtube.com or youtu.be
-        """)
+        - Video must have English captions.
+        - Links must be from youtube.com or youtu.be.
+        """
+        )
 
-    # Video URL input
     video_url = st.text_input(
-        "Enter YouTube Video URL:",
-        help="Paste the full YouTube video URL here"
+        "Enter YouTube Video URL:", help="Paste the full YouTube video URL here"
     )
 
-    # Process video
     if video_url and st.button("Load Video", type="primary"):
         st.session_state.video_loaded = False
         st.session_state.chat_history = []
@@ -210,7 +186,6 @@ def main():
                     st.session_state.video_loaded = True
                     st.success("Ready to chat about the video!")
 
-    # Chat interface
     if st.session_state.video_loaded and st.session_state.qa_chain:
         st.markdown("### Chat")
 
@@ -228,16 +203,15 @@ def main():
                 with st.spinner("Thinking..."):
                     try:
                         response = st.session_state.qa_chain({"question": prompt})
-                        st.write(response['answer'])
+                        st.write(response["answer"])
                         st.session_state.chat_history.append(
-                            {"role": "assistant", "content": response['answer']}
+                            {"role": "assistant", "content": response["answer"]}
                         )
                     except Exception as e:
                         st.error(f"Error: {str(e)}")
 
     elif not video_url:
         st.info("👆 Start by entering a YouTube video URL above")
-
 
 if __name__ == "__main__":
     main()

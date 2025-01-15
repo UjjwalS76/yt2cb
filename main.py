@@ -1,22 +1,20 @@
 import streamlit as st
 import os
 import re
-from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound
 from typing import Optional, Dict, List
 
-# LangChain + Perplexity AI (using Sonar models)
+# LangChain + Perplexity AI
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.chains import ConversationalRetrievalChain
 from langchain.memory import ConversationBufferMemory
 from langchain.schema import Document
 from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import HuggingFaceEmbeddings  # Using HuggingFace for embeddings
-from langchain_community.chat_models import ChatAnyscale  # Using Anyscale for Perplexity models
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.chat_models import ChatAnyscale
 
-
-# Replace with your Perplexity API key from st.secrets
+# Get API key from Streamlit secrets
 os.environ["ANYSCALE_API_KEY"] = st.secrets["ANYSCALE_API_KEY"]
-
 
 def extract_video_id(url: str) -> Optional[str]:
     """Extract YouTube video ID from URL."""
@@ -32,23 +30,36 @@ def extract_video_id(url: str) -> Optional[str]:
             return match.group(1)
     return None
 
-
 def get_video_info_from_transcript(transcript_list) -> Dict:
-    """Get basic video info from transcript metadata."""
+    """Get basic video info from transcript metadata (or handle errors)."""
     try:
+        # Attempt to find English transcript
         transcript = transcript_list.find_transcript(['en'])
         video_info = transcript.video_metadata
         return {
             "title": video_info.get('title', 'Unknown Title'),
             "duration": video_info.get('duration', 0)
         }
+    except NoTranscriptFound:
+        # Fallback if English transcript not found
+        st.warning("English transcript not found. Attempting to use other available transcripts.")
+        try:
+            transcript = transcript_list.find_transcript([]) # Find any transcript
+            video_info = transcript.video_metadata
+            return {
+                "title": video_info.get('title', 'Unknown Title'),
+                "duration": video_info.get('duration', 0)
+            }
+        except Exception as e:
+            st.warning(f"Could not fetch video metadata: {e}")
+            return {"title": "Unknown Title", "duration": 0}
     except Exception as e:
-        st.warning(f"Could not fetch video metadata: {str(e)}")
+        st.warning(f"Could not fetch video metadata: {e}")
         return {"title": "Unknown Title", "duration": 0}
 
 
 def load_video_transcript(video_url: str) -> Optional[List[Document]]:
-    """Load and process YouTube video transcript."""
+    """Load and process YouTube video transcript with enhanced error handling."""
     try:
         video_id = extract_video_id(video_url)
         if not video_id:
@@ -58,23 +69,35 @@ def load_video_transcript(video_url: str) -> Optional[List[Document]]:
         # Get transcripts
         transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
 
-        # Try to get video info from transcript
+        # Try to get video info from transcript (with fallback)
         video_info = get_video_info_from_transcript(transcript_list)
         st.write(f"📺 **Video Title:** {video_info['title']}")
 
-        # Try getting English transcript
+        # More robust transcript retrieval
         try:
+            # 1. Try to find a generated English transcript
             transcript = transcript_list.find_generated_transcript(['en'])
-        except:
+            st.write("Using generated English transcript.")
+        except NoTranscriptFound:
             try:
+                # 2. Try to find a manually created English transcript
                 transcript = transcript_list.find_manually_created_transcript(['en'])
-            except:
+                st.write("Using manually created English transcript.")
+            except NoTranscriptFound:
                 try:
+                    # 3. Try to find any generated transcript and translate it to English
                     transcript = transcript_list.find_generated_transcript([])
                     transcript = transcript.translate('en')
-                except Exception as e:
-                    st.error(f"No suitable transcript found: {str(e)}")
-                    return None
+                    st.write("Using translated generated transcript.")
+                except NoTranscriptFound:
+                    try:
+                        # 4. Try to find any manually created transcript and translate it to English
+                        transcript = transcript_list.find_manually_created_transcript([])
+                        transcript = transcript.translate('en')
+                        st.write("Using translated manually created transcript.")
+                    except Exception as e:
+                        st.error(f"No suitable transcript found: {e}")
+                        return None
 
         # Get transcript text
         transcript_pieces = transcript.fetch()
@@ -94,7 +117,8 @@ def load_video_transcript(video_url: str) -> Optional[List[Document]]:
         return [doc]
 
     except Exception as e:
-        st.error(f"Error loading transcript: {str(e)}")
+        st.error(f"Error loading transcript: {e}")
+        # Add more specific error handling if needed (e.g., for network issues)
         return None
 
 
@@ -117,7 +141,7 @@ def setup_qa_chain(transcript_docs):
 
         # Setup LLM using Perplexity via Anyscale
         llm = ChatAnyscale(
-            model_name="mistralai/llama-3-sonar-small-32k-online", # Changed the model here
+            model_name="mistralai/llama-3-sonar-small-32k-online",
             temperature=0.7,
         )
 
